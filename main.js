@@ -32,33 +32,10 @@ if (_profileArg) {
 const fs = require('fs');
 const os = require('os');
 
-// electron-store uses different paths per platform
-let configPath;
-if (process.platform === 'darwin') {
-  configPath = path.join(os.homedir(), 'Library', 'Application Support', 'claude-usage-widget', 'config.json');
-} else if (process.platform === 'win32') {
-  configPath = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'claude-usage-widget', 'config.json');
-} else {
-  // Linux
-  configPath = path.join(os.homedir(), '.config', 'claude-usage-widget', 'config.json');
-}
-
-try {
-  if (fs.existsSync(configPath)) {
-    const rawData = fs.readFileSync(configPath, 'utf-8');
-    // Check if file looks encrypted (contains non-JSON garbage or doesn't start with {)
-    if (rawData.includes('\u0000') || !rawData.trim().startsWith('{')) {
-      console.log('[Migration] Detected old encrypted config from v1.7.0, deleting for fresh start');
-      fs.unlinkSync(configPath);
-    }
-  }
-} catch (err) {
-  console.error('[Migration] Error checking config file:', err.message);
-  // If we can't read it, try to delete it
-  try {
-    if (fs.existsSync(configPath)) fs.unlinkSync(configPath);
-  } catch {}
-}
+// Follow Electron's final userData path, including any --profile redirect.
+const configPath = path.join(app.getPath('userData'), 'config.json');
+const { quarantineUnreadableConfig } = require('./src/config-migration');
+quarantineUnreadableConfig(configPath);
 
 // Non-sensitive settings storage (no encryption needed)
 const store = new Store();
