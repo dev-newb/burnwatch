@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('node:path');
 const {
   parseWslDistros,
   linuxHomeToUnc,
@@ -37,6 +38,7 @@ test('credential discovery includes Windows and every usable WSL home', () => {
     force: true,
     homedir: 'C:\\Users\\Sahar',
     platform: 'win32',
+    pathImpl: path.win32,
     spawnSyncImpl
   }), [
     { id: 'windows', kind: 'windows', home: 'C:\\Users\\Sahar' },

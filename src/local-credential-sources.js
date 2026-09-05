@@ -66,17 +66,18 @@ function discoverCredentialHomes({
   force = false,
   homedir,
   platform = process.platform,
-  spawnSyncImpl = spawnSync
+  spawnSyncImpl = spawnSync,
+  pathImpl = path
 } = {}) {
   const localHome = homedir || require('os').homedir();
   const mayUseCache = !force && !homedir && platform === process.platform
-    && spawnSyncImpl === spawnSync;
+    && spawnSyncImpl === spawnSync && pathImpl === path;
   if (mayUseCache && cachedHomes) {
     return cachedHomes.map((entry) => ({ ...entry }));
   }
 
   const homes = [
-    { id: 'windows', kind: platform === 'win32' ? 'windows' : 'local', home: path.resolve(localHome) },
+    { id: 'windows', kind: platform === 'win32' ? 'windows' : 'local', home: pathImpl.resolve(localHome) },
     ...discoverWslHomes({ spawnSyncImpl, platform })
   ];
   if (mayUseCache) {

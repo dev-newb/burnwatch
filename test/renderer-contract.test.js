@@ -8,9 +8,10 @@ const path = require('node:path');
 const rendererDir = path.join(__dirname, '..', 'src', 'renderer');
 const repoDir = path.join(__dirname, '..');
 
-test('CLI compact labels retain the intentional terminal cursor', () => {
+test('compact accounts use ribbons instead of terminal cursors', () => {
   const source = fs.readFileSync(path.join(rendererDir, 'app.js'), 'utf8');
-  assert.match(source, /labelEl\.textContent = p\.code \+ \(p\.cli \? '_' : ''\);/);
+  assert.match(source, /compact-ribbon/);
+  assert.doesNotMatch(source, /labelEl\.textContent = p\.code \+ \(p\.cli \? '_' : ''\);/);
 });
 
 test('both charts preserve gaps and persist stable series identifiers', () => {
@@ -209,7 +210,7 @@ test('burn-detector fire is wired end to end in the pool colour', () => {
   assert.match(app, /--fire-col/);
   // CSS: heat underlay on full and compact bars, and the live pixel-fire loop
   // that actually burns them
-  assert.match(css, /\.progress-fill\.on-fire,\s*\.compact-bar-fill\.on-fire/);
+  assert.match(css, /\.progress-fill\.on-fire:not\(\.maxed\),\s*\.compact-bar-fill\.on-fire:not\(\.maxed\)/);
   assert.match(css, /\.ambient-fire/);
   // The orbs' flame is the pixel engine, never a CSS tongue: a gradient read
   // as a glow, and with animations off it sat frozen on top of the circle,
