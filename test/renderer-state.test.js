@@ -29,3 +29,25 @@ test('Electron settings form cannot overwrite backend adoption', () => {
   assert.doesNotMatch(main.slice(start,end),/store\.(?:set|delete)\(['"]settings\.cliAdopted/);
   assert.doesNotMatch(main.slice(start,end),/store\.set\(['"]settings['"]/);
 });
+
+test('first OAuth connection refreshes credentials before fetching and starts polling', async () => {
+  const start=renderer.indexOf('    const runConnect = async');
+  const end=renderer.indexOf('    const wireConnect =',start);
+  for (const provider of ['openai','google']) {
+    for (const overlay of ['none','flex']) {
+      const calls=[];
+      const ctx=vm.createContext({credentials:{loggedIn:false},
+        elements:{settingsOverlay:{style:{display:overlay}}},
+        window:{electronAPI:{
+          oauthConnect:async p=>{assert.equal(p,provider);return {ok:true};},
+          getCredentials:async()=>{calls.push('credentials');return {providerFallbackAvailable:true};}
+        }},
+        fetchUsageData:async()=>{assert.equal(ctx.credentials.providerFallbackAvailable,true);calls.push('fetch');},
+        loadSettings:async()=>calls.push('settings'),startAutoUpdate:()=>calls.push('poll')
+      });
+      vm.runInContext(renderer.slice(start,end)+'\nglobalThis.runConnect=runConnect;',ctx);
+      await ctx.runConnect(provider);
+      assert.deepEqual(calls,overlay==='none'?['credentials','fetch','poll']:['credentials','fetch','settings','poll']);
+    }
+  }
+});
