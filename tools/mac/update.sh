@@ -19,11 +19,18 @@ LOG="$HOME/Library/Logs/burnwatch-update.log"
 # script that works in Terminal fails under launchd without this line.
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
-# A locally built app needs no Developer ID: it never gets a quarantine flag,
-# so Gatekeeper never inspects it. Real signing only invites failure here —
-# a machine holding two identically-named certs makes codesign abort as
-# "ambiguous" and kills the build. Ad-hoc unless the caller asks otherwise.
-export CSC_IDENTITY_AUTO_DISCOVERY="${CSC_IDENTITY_AUTO_DISCOVERY:-false}"
+# Safe Storage's Keychain ACL depends on this signing identity. Sign by hash
+# after packaging, avoiding ambiguous certificate names and ad-hoc installs.
+sign_update_bundle() {
+    local signature
+    codesign --force --deep --sign 6414A85D915F112D91B0BE476AA9F1F735F165BE "$1" || return 1
+    signature="$(codesign -dvv "$1" 2>&1)" || return 1
+    if ! printf '%s\n' "$signature" | grep -Fxq 'Authority=Apple Development: rmcquail@gmail.com (7K7LZM5SAP)'; then
+        echo "unexpected signing authority; refusing to replace the installed app"
+        return 1
+    fi
+    codesign --verify --deep --strict "$1"
+}
 
 mkdir -p "$(dirname "$LOG")"
 exec >>"$LOG" 2>&1
@@ -80,7 +87,8 @@ if [ "$needs_build" = 1 ]; then
     if [ "$(uname -m)" = "arm64" ]; then archflag="--arm64"; else archflag="--x64"; fi
     echo "building $archflag"
     # 'dir' target: just the .app, skipping the dmg — faster, and we install by copy.
-    npx electron-builder --mac dir $archflag || {
+    # Defer signing to the hash-pinned, verified step below.
+    npx electron-builder --mac dir $archflag -c.mac.identity=null || {
         echo "build failed"
         notify "Update failed — see ~/Library/Logs/burnwatch-update.log"
         exit 1
@@ -89,6 +97,11 @@ if [ "$needs_build" = 1 ]; then
     built="$(find dist -maxdepth 2 -name "${APP_NAME}.app" -type d | head -1)"
     [ -n "$built" ] || { echo "build produced no .app"; notify "Update failed (no app built)"; exit 1; }
     echo "built: $built"
+    sign_update_bundle "$built" || {
+        echo "signature verification failed"
+        notify "Update failed (signing)"
+        exit 1
+    }
 
     # The app may still be running — and may be the very bundle being replaced,
     # if the user started this from the update banner. Let it exit, then insist.
