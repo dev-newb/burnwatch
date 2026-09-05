@@ -19,6 +19,14 @@ function validEntry(entry) {
   return !!entry && typeof entry === 'object' && Number.isFinite(entry.timestamp);
 }
 
+async function syncDirectory(dir) {
+  // Windows does not expose directory fsync through Node. Individual files
+  // are still flushed before the rename on every platform.
+  if (process.platform === 'win32') return;
+  const handle = await fsp.open(dir, 'r');
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
 function dedupeEntries(entries) {
   // Bucket by timestamp so the expensive JSON comparison only runs for the
   // rare colliding samples instead of stringifying every retained entry on
@@ -70,10 +78,39 @@ class JsonlHistoryStore {
     return this.cache.get(String(scope || 'default')) || [];
   }
 
+  _enqueue(scope, work) {
+    const key = String(scope || 'default');
+    const operation = (this.queues.get(key) || Promise.resolve()).then(work);
+    this.queues.set(key, operation.catch(() => {}));
+    return operation;
+  }
+
+  async _recoverScope(scope) {
+    const dir = this.scopeDir(scope);
+    try {
+      await fsp.access(dir);
+      return;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+    // A crash between the two renames leaves the complete old directory here.
+    try {
+      await fsp.rename(`${dir}.previous`, dir);
+      await syncDirectory(this.baseDir);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+
   async read(scope, { refresh = false } = {}) {
+    return this._enqueue(scope, () => this._read(scope, { refresh }));
+  }
+
+  async _read(scope, { refresh = false } = {}) {
     const cacheKey = String(scope || 'default');
     if (!refresh && this.cache.has(cacheKey)) return this.cache.get(cacheKey);
     await this.init();
+    await this._recoverScope(scope);
     const dir = this.scopeDir(scope);
     let files = [];
     try {
@@ -112,27 +149,30 @@ class JsonlHistoryStore {
   async append(scope, entry) {
     if (!validEntry(entry)) throw new Error('History entry requires a finite timestamp');
     const cacheKey = String(scope || 'default');
-    const previous = this.queues.get(cacheKey) || Promise.resolve();
-    const operation = previous.then(async () => {
+    return this._enqueue(scope, async () => {
       await this.init();
+      await this._recoverScope(scope);
       const dir = this.scopeDir(scope);
       await fsp.mkdir(dir, { recursive: true });
       await fsp.appendFile(path.join(dir, `${dayName(entry.timestamp)}.jsonl`), `${JSON.stringify(entry)}\n`, 'utf8');
-      const current = this.cache.has(cacheKey) ? this.cache.get(cacheKey) : await this.read(scope);
+      const current = this.cache.has(cacheKey) ? this.cache.get(cacheKey) : await this._read(scope);
       const retained = this._retain([...current, entry]);
       this.cache.set(cacheKey, retained);
       // Deliberately NO pruneExpiredFiles here: file retention runs on the
       // owner's schedule (startup + a timer), off the awaited refresh path.
       return retained;
     });
-    this.queues.set(cacheKey, operation.catch(() => {}));
-    return operation;
   }
 
   async replace(scope, entries) {
+    return this._enqueue(scope, () => this._replace(scope, entries));
+  }
+
+  async _replace(scope, entries) {
     await this.init();
+    await this._recoverScope(scope);
     const dir = this.scopeDir(scope);
-    await fsp.mkdir(dir, { recursive: true });
+    const backup = `${dir}.previous`;
     const retained = this._retain(entries);
     const grouped = new Map();
     for (const entry of retained) {
@@ -141,25 +181,77 @@ class JsonlHistoryStore {
       grouped.get(day).push(entry);
     }
 
-    const existing = (await fsp.readdir(dir)).filter((file) => /^\d{4}-\d{2}-\d{2}\.jsonl(?:\.tmp)?$/.test(file));
-    for (const file of existing) await fsp.unlink(path.join(dir, file));
-    for (const [day, dayEntries] of grouped) {
-      const target = path.join(dir, `${day}.jsonl`);
-      const temporary = `${target}.tmp`;
-      const body = `${dayEntries.map((entry) => JSON.stringify(entry)).join('\n')}\n`;
-      await fsp.writeFile(temporary, body, { encoding: 'utf8', mode: 0o600 });
-      await fsp.rename(temporary, target);
+    const staging = await fsp.mkdtemp(`${dir}.staging-`);
+    let backedUp = false;
+    let published = false;
+    let cleanupStaging = true;
+    try {
+      for (const [day, dayEntries] of grouped) {
+        const target = path.join(staging, `${day}.jsonl`);
+        const body = `${dayEntries.map((entry) => JSON.stringify(entry)).join('\n')}\n`;
+        const file = await fsp.open(target, 'wx', 0o600);
+        try {
+          await file.writeFile(body, 'utf8');
+          await file.sync();
+        } finally {
+          await file.close();
+        }
+        if (await fsp.readFile(target, 'utf8') !== body) {
+          throw new Error(`History replacement validation failed for ${day}`);
+        }
+      }
+      await syncDirectory(staging);
+      // The live directory is still intact while the replacement is written,
+      // flushed and checked. Only an older completed backup may be removed.
+      await fsp.rm(backup, { recursive: true, force: true });
+      try {
+        await fsp.rename(dir, backup);
+        backedUp = true;
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+      await syncDirectory(this.baseDir);
+      await fsp.rename(staging, dir);
+      published = true;
+      await syncDirectory(this.baseDir);
+    } catch (error) {
+      this.cache.delete(String(scope || 'default'));
+      if (backedUp) {
+        try {
+          if (published) await fsp.rename(dir, staging);
+          await fsp.rename(backup, dir);
+          await syncDirectory(this.baseDir);
+        } catch (rollbackError) {
+          // Keep both recoverable copies if even rollback encounters an I/O
+          // failure. The next disk operation restores .previous if needed.
+          cleanupStaging = false;
+          throw new AggregateError([error, rollbackError], 'History replacement and rollback failed');
+        }
+      }
+      throw error;
+    } finally {
+      if (cleanupStaging) await fsp.rm(staging, { recursive: true, force: true })
+        .catch(error => this.logger('[History] Staging cleanup failed:', error.message));
     }
     this.cache.set(String(scope || 'default'), retained);
+    await fsp.rm(backup, { recursive: true, force: true })
+      .catch(error => this.logger('[History] Backup cleanup failed:', error.message));
     return retained;
   }
 
   async migrate(scope, legacyEntries) {
-    const existing = await this.read(scope, { refresh: true });
-    return this.replace(scope, [...existing, ...(legacyEntries || [])]);
+    return this._enqueue(scope, async () => {
+      const existing = await this._read(scope, { refresh: true });
+      return this._replace(scope, [...existing, ...(legacyEntries || [])]);
+    });
   }
 
   async pruneExpiredFiles(scope) {
+    return this._enqueue(scope, () => this._pruneExpiredFiles(scope));
+  }
+
+  async _pruneExpiredFiles(scope) {
+    await this._recoverScope(scope);
     const dir = this.scopeDir(scope);
     let files;
     try {
