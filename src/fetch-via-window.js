@@ -53,19 +53,22 @@ function parseResponseBody(bodyText) {
 }
 
 /**
- * Status-aware classification for in-page fetch results. 401/403 throw an
+ * Status-aware classification for in-page fetch results. JSON 401/403 throw an
  * error carrying statusCode so isExplicitAuthFailure() can recognize a dead
  * session without guessing from the body shape.
  * @param {{status: number, bodyText: string}} result
  */
 function classifyFetchResult(result) {
   const status = Number(result?.status);
+  // A challenge page or malformed body does not establish an expired login.
+  const data = parseResponseBody(String(result?.bodyText ?? ''));
   if (status === 401 || status === 403) {
     const error = new Error(`AuthFailure: HTTP ${status}`);
     error.statusCode = status;
     throw error;
   }
-  return parseResponseBody(String(result?.bodyText ?? ''));
+  if (!(status >= 200 && status < 300)) throw new Error(`HTTPFailure: HTTP ${status}`);
+  return data;
 }
 
 // The parked page: cheap, same-origin, and rarely challenged. If Cloudflare

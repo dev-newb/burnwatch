@@ -37,7 +37,17 @@ test('status-aware classification turns 401/403 into explicit auth failures', ()
   }
 
   assert.throws(() => classifyFetchResult({ status: 401, bodyText: '{}' }), (err) => err.statusCode === 401);
-  assert.throws(() => classifyFetchResult({ status: 403, bodyText: 'denied' }), (err) => err.statusCode === 403);
+  assert.throws(() => classifyFetchResult({ status: 403, bodyText: '{"error":"denied"}' }), (err) => err.statusCode === 403);
   assert.deepEqual(classifyFetchResult({ status: 200, bodyText: '{"ok":1}' }), { ok: 1 });
   assert.throws(() => classifyFetchResult({ status: 200, bodyText: '<html>Just a moment' }), /CloudflareBlocked/);
+  const { isExplicitAuthFailure } = require('../src/usage-math');
+  for (const result of [
+    {status:403,bodyText:'<html>Just a moment</html>'},
+    {status:401,bodyText:'Enable JavaScript and cookies to continue'},
+    {status:401,bodyText:'broken response'},
+    {status:429,bodyText:'{"error":"rate limited"}'},
+    {status:500,bodyText:'{"error":"server error"}'}
+  ]) {
+    assert.throws(() => classifyFetchResult(result), error => !isExplicitAuthFailure(error));
+  }
 });
