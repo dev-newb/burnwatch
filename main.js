@@ -661,7 +661,7 @@ const readCodexSessionSnapshot = memoizeCredentialRead(readCodexSessionSnapshotU
 // OpenAI omits that array much of the time, so every caller must cope with
 // null; this is strictly enrichment on top of the HTTP data.
 const CODEX_APPSERVER_TTL_MS = 5 * 60 * 1000;
-let _codexResetExpiryCache = { at: 0, value: null };
+let _codexResetExpiryCache = { at: 0, value: null, accountEmail: null };
 
 function resolveCodexBinary() {
   const candidates = [
@@ -741,11 +741,12 @@ function readCodexResetExpiry() {
   });
 }
 
-async function codexResetExpiry() {
+async function codexResetExpiry(accountEmail) {
   const now = Date.now();
-  if (now - _codexResetExpiryCache.at < CODEX_APPSERVER_TTL_MS) return _codexResetExpiryCache.value;
+  if (_codexResetExpiryCache.accountEmail === accountEmail
+      && now - _codexResetExpiryCache.at < CODEX_APPSERVER_TTL_MS) return _codexResetExpiryCache.value;
   const value = await readCodexResetExpiry().catch(() => null);
-  _codexResetExpiryCache = { at: now, value };
+  _codexResetExpiryCache = { at: now, value, accountEmail };
   return value;
 }
 
@@ -826,8 +827,11 @@ async function fetchCodexUsageBase() {
 // array, the usage data is returned exactly as the HTTP endpoint gave it.
 async function fetchCodexUsage() {
   const data = await fetchCodexUsageBase();
-  if (!data || !data.resetCredits) return data;
-  const expiry = await codexResetExpiry();
+  if (!data || !data.resetCredits || !cliAdoptionState().openai) return data;
+  const cliEmail = String(getCodexCliEmail() || '').trim().toLowerCase();
+  const accountEmail = String(data.email || '').trim().toLowerCase();
+  if (!cliEmail || cliEmail !== accountEmail) return data;
+  const expiry = await codexResetExpiry(accountEmail);
   if (expiry && expiry.credits?.length) {
     data.resetCredits = { ...data.resetCredits, credits: expiry.credits };
   }
@@ -1559,6 +1563,7 @@ function resetLocalCredentialCaches() {
   _credFileCache.clear();
   for (const memo of _credMemos) memo._reset();
   _geminiAccessToken = { token: null, expiresAt: 0 };
+  _codexResetExpiryCache = { at: 0, value: null, accountEmail: null };
   _ccSameState = { mode: null, candidate: null, streak: 0 };
   for (const key of Object.keys(_providerCache)) delete _providerCache[key];
 }
