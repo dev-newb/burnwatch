@@ -10,6 +10,7 @@ const { recoverBounds, clearsVisibilityThreshold } = require('./src/window-bound
 const { startOAuthCallbackServer } = require('./src/oauth-callback');
 const { sanitizeHiddenSeries, sanitizeFetchOptions, migrateHiddenSeriesLabels } = require('./src/settings-validation');
 const { normalizeGeminiQuota, normalizeAntigravityModels } = require('./src/provider-models');
+const { googleQuotaIssue, googleConnectionStatus } = require('./src/google-connection');
 const { discoverCredentialHomes, clearCredentialHomeCache } = require('./src/local-credential-sources');
 
 const GITHUB_OWNER = 'dev-newb';
@@ -995,9 +996,8 @@ function postGeminiCodeAssist(token, method, payload) {
       res.on('end', () => {
         if (res.statusCode !== 200) {
           debugLog(`[Gemini] ${method} failed with status`, res.statusCode);
-          return resolve(null);
         }
-        try { resolve(JSON.parse(data)); } catch { resolve(null); }
+        try { resolve({ ...JSON.parse(data), httpStatus: res.statusCode }); } catch { resolve(null); }
       });
     });
     req.on('error', (err) => { debugLog(`[Gemini] ${method} error:`, err.message); resolve(null); });
@@ -1009,7 +1009,7 @@ function postGeminiCodeAssist(token, method, payload) {
 // One row per quota bucket — Google meters each model VERSION separately, so
 // collapsing buckets loses real information. Unknown/future model IDs are
 // retained by normalizeGeminiQuota and appear automatically.
-async function fetchGeminiWithToken(token) {
+async function fetchGeminiWithToken(token, reportIssue = () => {}) {
   const load = await postGeminiCodeAssist(token, 'loadCodeAssist', {
     metadata: {
       ideType: 'IDE_UNSPECIFIED',
@@ -1022,7 +1022,14 @@ async function fetchGeminiWithToken(token) {
     : null;
   if (!project) debugLog('[Gemini] Code Assist project unavailable; requesting fallback quota set');
   const quota = await postGeminiCodeAssist(token, 'retrieveUserQuota', project ? { project } : {});
-  return normalizeGeminiQuota(quota);
+  const normalized = normalizeGeminiQuota(quota);
+  reportIssue(googleQuotaIssue(quota, !!normalized));
+  return normalized;
+}
+
+let _googleOAuthQuotaState = null;
+function getGoogleConnectionStatus() {
+  return googleConnectionStatus(loadOAuthTokens('google'), _googleOAuthQuotaState);
 }
 
 // The gemini CLI's login email, from its stored id_token
@@ -1038,7 +1045,9 @@ function getGeminiCliEmail() {
 // Primary = the widget's own Google login; CLI creds are fallback + dual source
 async function fetchGeminiUsage() {
   const oauth = await getOAuthAccessToken('google');
-  let primary = oauth ? await fetchGeminiWithToken(oauth.accessToken) : null;
+  let primary = oauth ? await fetchGeminiWithToken(oauth.accessToken, issue => {
+    _googleOAuthQuotaState = { token: oauth.accessToken, issue };
+  }) : null;
   if (primary) {
     primary.email = oauth.email || null;
   }
@@ -1294,6 +1303,7 @@ function storeOAuthTokens(provider, tokens) {
   } else {
     store.set(`oauth_${provider}`, json);
   }
+  if (provider === 'google') _googleOAuthQuotaState = null;
 }
 
 function loadOAuthTokens(provider) {
@@ -1313,6 +1323,7 @@ function loadOAuthTokens(provider) {
 function clearOAuthTokens(provider) {
   store.delete(`oauth_${provider}_encrypted`);
   store.delete(`oauth_${provider}`);
+  if (provider === 'google') _googleOAuthQuotaState = null;
 }
 
 function hasExternalProviderCredentials() {
@@ -1486,6 +1497,10 @@ async function getOAuthAccessToken(provider) {
     const json = await resp.json();
     if (!json.access_token) {
       debugLog(`[OAuth:${provider}] Refresh failed (${resp.status})`);
+      if (provider === 'google') {
+        _googleOAuthQuotaState = { token: tokens.accessToken,
+          issue: json.error === 'invalid_grant' ? 'reauth-required' : 'quota-unavailable' };
+      }
       return null;
     }
     const updated = {
@@ -2157,6 +2172,16 @@ async function setSessionCookie(sessionKey) {
   debugLog('sessionKey cookie set in Electron session');
 }
 
+function applyMainWindowAlwaysOnTop() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const onTop = store.get('settings.alwaysOnTop', true);
+  // Reassert a pinned window, but also repair an incorrectly pinned window
+  // when the saved setting is off. Avoid disturbing an already-normal window.
+  if (onTop || mainWindow.isAlwaysOnTop() !== onTop) {
+    mainWindow.setAlwaysOnTop(onTop, 'floating');
+  }
+}
+
 function createMainWindow() {
   const savedPosition = store.get('windowPosition');
   const windowOptions = {
@@ -2170,7 +2195,7 @@ function createMainWindow() {
     backgroundColor: '#16161e',
     roundedCorners: true,
     thickFrame: true,
-    alwaysOnTop: true,
+    alwaysOnTop: store.get('settings.alwaysOnTop', true),
     resizable: true,
     maximizable: true,
     // Floor sits where the responsive ladder bottoms out — below this the
@@ -3444,6 +3469,7 @@ ipcMain.handle('get-credentials', () => {
     // OpenAI/Codex and Google/Gemini credentials remain useful even when the
     // user deliberately logs out of Claude.
     providerFallbackAvailable: hasExternalProviderCredentials(),
+    googleConnection: getGoogleConnectionStatus(),
     // Lets Settings warn when tokens would sit unencrypted on disk
     encryptionAvailable: safeStorage.isEncryptionAvailable()
   };
@@ -4074,7 +4100,7 @@ ipcMain.handle('save-settings', (event, settings) => {
     } else {
       mainWindow.setSkipTaskbar(settings.minimizeToTray);
     }
-    mainWindow.setAlwaysOnTop(settings.alwaysOnTop, 'floating');
+    applyMainWindowAlwaysOnTop();
   }
   if (chartRelevantSnapshot() !== chartBefore) {
     if (graphWindow && !graphWindow.isDestroyed()) {
@@ -4464,7 +4490,8 @@ ipcMain.handle('fetch-usage-data', async (event, options = {}) => {
     ]);
     const hasClaudeUsage = !!(cc && (cc.five_hour?.resets_at || cc.seven_day?.resets_at));
     const offers = detectCliOffers(cliAdopted);
-    if (!hasClaudeUsage && !codexF && !geminiF && !Object.keys(offers).length) {
+    const googleConnection = getGoogleConnectionStatus();
+    if (!hasClaudeUsage && !codexF && !geminiF && !Object.keys(offers).length && !googleConnection.connected) {
       throw new Error('Missing credentials');
     }
     const data = {
@@ -4472,7 +4499,8 @@ ipcMain.handle('fetch-usage-data', async (event, options = {}) => {
       seven_day: hasClaudeUsage ? cc.seven_day : null,
       limits: hasClaudeUsage ? (cc.limits || []) : [],
       anthropic_source: hasClaudeUsage ? 'cli' : 'none',
-      claude_code_same_account: hasClaudeUsage
+      claude_code_same_account: hasClaudeUsage,
+      googleConnection
     };
     if (codexF) data.codex = codexF;
     if (geminiF) data.gemini = geminiF;
@@ -4622,6 +4650,7 @@ ipcMain.handle('fetch-usage-data', async (event, options = {}) => {
   if (codex) data.codex = codex;
   const gemini = await geminiPromise;
   if (gemini) data.gemini = gemini;
+  data.googleConnection = getGoogleConnectionStatus();
   data.offers = detectCliOffers(cliAdopted);
 
   // History records the UNFILTERED accounts: the visibility toggles are a
@@ -4649,12 +4678,7 @@ ipcMain.handle('fetch-usage-data', async (event, options = {}) => {
   // Re-assert always-on-top after hidden BrowserWindows from fetchViaWindow
   // are destroyed — creating/destroying BrowserWindows can temporarily disrupt
   // the main window's z-order on some OS/window manager combinations.
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    const alwaysOnTop = store.get('settings.alwaysOnTop', true);
-    if (alwaysOnTop) {
-      mainWindow.setAlwaysOnTop(true, 'floating');
-    }
-  }
+  applyMainWindowAlwaysOnTop();
   if (graphWindow && !graphWindow.isDestroyed() && store.get('settings.graphAlwaysOnTop', true)) {
     graphWindow.setAlwaysOnTop(true, 'floating');
   }
@@ -4702,14 +4726,13 @@ app.whenReady().then(async () => {
 
   // Apply persisted settings
   const minimizeToTray = store.get('settings.minimizeToTray', false);
-  const alwaysOnTop = store.get('settings.alwaysOnTop', true);
   if (mainWindow) {
     if (process.platform === 'darwin') {
       if (minimizeToTray) app.dock.hide();
     } else {
       if (minimizeToTray) mainWindow.setSkipTaskbar(true);
     }
-    mainWindow.setAlwaysOnTop(alwaysOnTop, 'floating');
+    applyMainWindowAlwaysOnTop();
   }
   syncRestoreTray();
 
@@ -4718,12 +4741,7 @@ app.whenReady().then(async () => {
   // old per-request hidden fetch windows were the main disruptor; with the
   // persistent fetch window a 30s cadence is plenty.
   setInterval(() => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      const alwaysOnTopSetting = store.get('settings.alwaysOnTop', true);
-      if (alwaysOnTopSetting) {
-        mainWindow.setAlwaysOnTop(true, 'floating');
-      }
-    }
+    applyMainWindowAlwaysOnTop();
     // Re-assert the detached graph AFTER the widget so a pinned graph window
     // isn't repeatedly covered by the widget's topmost re-assertion.
     if (graphWindow && !graphWindow.isDestroyed() && store.get('settings.graphAlwaysOnTop', true)) {
