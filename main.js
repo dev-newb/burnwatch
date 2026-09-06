@@ -24,6 +24,7 @@ if (_profileArg) {
   const profileName = _profileArg.split('=')[1].replace(/[^a-zA-Z0-9_-]/g, '_');
   if (profileName) {
     app.setPath('userData', path.join(app.getPath('userData'), 'profiles', profileName));
+    console.log(`[Profile] Using profile "${profileName}" -> userData: ${app.getPath('userData')}`);
   }
 }
 
@@ -131,10 +132,9 @@ function hasTrayIcon() {
     .some((tray) => tray && !tray.isDestroyed());
 }
 
-function showMainWindowSmart() {
-  if (!mainWindow || mainWindow.isDestroyed()) {
-    createMainWindow();
-  }
+// Position-only recovery is also safe inside native focus/restore events:
+// showing or focusing again there would re-enter those same event handlers.
+function recoverMainWindowPosition() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const before = mainWindow.getBounds();
   const recovered = recoverWindowBounds(before, {
@@ -147,6 +147,14 @@ function showMainWindowSmart() {
     mainWindow.setBounds(recovered);
     store.set('windowPosition', { x: recovered.x, y: recovered.y });
   }
+}
+
+function showMainWindowSmart() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createMainWindow();
+  }
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  recoverMainWindowPosition();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
@@ -2249,6 +2257,11 @@ function createMainWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+
+  // A native taskbar/Dock restore or focus bypasses our tray and activate
+  // handlers. Recover after monitor changes through those paths as well.
+  mainWindow.on('restore', recoverMainWindowPosition);
+  mainWindow.on('focus', recoverMainWindowPosition);
 
   if (process.env.NODE_ENV === 'development') {
     mainWindow.webContents.openDevTools({ mode: 'detach' });

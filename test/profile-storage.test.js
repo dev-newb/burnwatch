@@ -25,15 +25,18 @@ test('named profiles isolate migration and history using the final userData path
   const scopes = [];
   for (const profile of ['one', 'two']) {
     let userData = dir;
+    const profileLogs = [];
     const ctx = vm.createContext({
       app: { getPath: () => userData, setPath: (_, value) => { userData = value; } },
       process: { argv: [`--profile=${profile}`] }, path, require: createRequire(mainPath),
+      console: { log: message => profileLogs.push(message) },
       JsonlHistoryStore, HISTORY_RETENTION_DAYS: 8, MAX_HISTORY_SAMPLES: 10000, debugLog() {}
     });
     const startup = main.slice(main.indexOf('// Profile isolation'), main.indexOf('// Non-sensitive settings storage'));
     const history = main.match(/const historyStore = new JsonlHistoryStore\([^]*?\n}\);/)[0];
     vm.runInContext(startup + '\n' + history + '\nglobalThis.paths = { configPath, historyStore };', ctx);
     assert.equal(ctx.paths.configPath, path.join(dir, 'profiles', profile, 'config.json'));
+    assert.deepEqual(profileLogs, [`[Profile] Using profile "${profile}" -> userData: ${path.join(dir, 'profiles', profile)}`]);
     const store = ctx.paths.historyStore;
     await store.append('org', { timestamp: Date.now(), session: profile === 'one' ? 10 : 20 });
     scopes.push(store.scopeDir('org'));
