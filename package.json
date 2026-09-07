@@ -47,7 +47,7 @@
       {
         "provider": "github",
         "owner": "dev-newb",
-        "repo": "imburning"
+        "repo": "imburning-electron"
       }
     ],
     "win": {

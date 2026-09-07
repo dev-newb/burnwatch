@@ -6,6 +6,22 @@ const path = require('node:path');
 const vm = require('node:vm');
 const renderer = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
 
+test('update banner opens the detected release candidate instead of the latest stable release', async () => {
+  const opened = [];
+  const ctx = vm.createContext({
+    _lastUpdateCheckAt: 0, _updateCheckRetries: 0, _updateReadyToInstall: false, _canSelfUpdate: false, _updateReleaseTag: null,
+    APP_REPO: 'https://github.com/dev-newb/imburning-electron', resizeWidget() {}, debugLog() {},
+    elements: {updateBannerText: {}, updateBanner: {style: {}}, settingsUpdateLink: {style: {}}},
+    window: {electronAPI: {checkForUpdate: async () => ({hasUpdate: true, version: '2.7.0-rc.10', tag: 'v2.7.0-rc.10'}),
+      openExternal: url => opened.push(url)}}
+  });
+  vm.runInContext(renderer.match(/async function checkForUpdate\(\) {[\s\S]*?\n}/)[0], ctx);
+  vm.runInContext(renderer.match(/    const applyUpdateClick = \(\) => {[\s\S]*?\n    };/)[0] + '\nglobalThis.clickUpdate = applyUpdateClick;', ctx);
+  await ctx.checkForUpdate();
+  ctx.clickUpdate();
+  assert.deepEqual(opened, ['https://github.com/dev-newb/imburning-electron/releases/tag/v2.7.0-rc.10']);
+});
+
 test('adoption changes refresh the canonical settings cache for toggles and offers', async () => {
   let state = {openai:true,google:false};
   const ctx = vm.createContext({window:{_cachedSettings:{cliAdopted:{...state}},electronAPI:{
