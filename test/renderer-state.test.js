@@ -24,7 +24,8 @@ test('update banner opens the detected release candidate instead of the latest s
 
 test('adoption changes refresh the canonical settings cache for toggles and offers', async () => {
   let state = {openai:true,google:false};
-  const ctx = vm.createContext({window:{_cachedSettings:{cliAdopted:{...state}},electronAPI:{
+  const baselines = [];
+  const ctx = vm.createContext({resetAccountAlertBaseline: p => baselines.push(p), window:{_cachedSettings:{cliAdopted:{...state}},electronAPI:{
     setCliAdopted:async(provider,adopted)=>({ok:true,state:state={...state,[provider]:adopted}})
   }}});
   vm.runInContext(renderer.match(/async function updateCliAdoption\([\s\S]*?\n}/)[0],ctx);
@@ -36,6 +37,7 @@ test('adoption changes refresh the canonical settings cache for toggles and offe
   ctx.window.electronAPI.setCliAdopted=async()=>({ok:false});
   await assert.rejects(ctx.updateCliAdoption('openai',true));
   assert.equal(ctx.window._cachedSettings.cliAdopted.openai,false);
+  assert.deepEqual(baselines, ['openai', 'google']);
 });
 
 test('Electron settings form cannot overwrite backend adoption', () => {
@@ -53,6 +55,7 @@ test('first OAuth connection refreshes credentials before fetching and starts po
     for (const overlay of ['none','flex']) {
       const calls=[];
       const ctx=vm.createContext({credentials:{loggedIn:false},
+        resetAccountAlertBaseline: p=>{assert.equal(p,provider);calls.push('baseline');},
         elements:{settingsOverlay:{style:{display:overlay}}},
         window:{electronAPI:{
           oauthConnect:async p=>{assert.equal(p,provider);return {ok:true};},
@@ -63,7 +66,7 @@ test('first OAuth connection refreshes credentials before fetching and starts po
       });
       vm.runInContext(renderer.slice(start,end)+'\nglobalThis.runConnect=runConnect;',ctx);
       await ctx.runConnect(provider);
-      assert.deepEqual(calls,overlay==='none'?['credentials','fetch','poll']:['credentials','fetch','settings','poll']);
+      assert.deepEqual(calls,overlay==='none'?['baseline','credentials','fetch','poll']:['baseline','credentials','fetch','settings','poll']);
     }
   }
 });

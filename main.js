@@ -11,6 +11,7 @@ const { startOAuthCallbackServer } = require('./src/oauth-callback');
 const { sanitizeHiddenSeries, sanitizeFetchOptions, migrateHiddenSeriesLabels } = require('./src/settings-validation');
 const { normalizeGeminiQuota, normalizeAntigravityModels } = require('./src/provider-models');
 const { googleQuotaIssue, googleConnectionStatus } = require('./src/google-connection');
+const { PROVIDER_SERIES, usageAccountIdentities, sameAccountHistory } = require('./src/account-history');
 const { discoverCredentialHomes, clearCredentialHomeCache } = require('./src/local-credential-sources');
 
 const { owner: GITHUB_OWNER, repo: GITHUB_REPO } = require('./package.json').build.publish[0];
@@ -1900,6 +1901,7 @@ const _burnAlertAt = {};                      // seriesKey -> last alert timesta
 const BURN_SETTLE_MS = 45 * 60 * 1000;
 const BURN_COOLING_MS = 8 * 60 * 1000;
 const _burningSeries = {};                    // seriesKey -> { until }
+let _burnAccountIdentities = {};
 function getBurningSeriesMap() {
   const cutoff = Date.now();
   const burning = {};
@@ -1920,6 +1922,14 @@ function checkBurnAnomalies() {
   if (!store.get('settings.burnAlerts', true)) return;
 
   const history = getHistorySnapshot();
+  const identities = history.at(-1)?.accountIdentities || {};
+  for (const key of PROVIDER_SERIES) {
+    if (identities[key] !== _burnAccountIdentities[key]) {
+      _burningSeries[key] = { until: 0 };
+      _burnAlertAt[key] = 0;
+    }
+  }
+  _burnAccountIdentities = identities;
   if (history.length < 5) return;
   const now = history[history.length - 1].timestamp;
 
@@ -1951,7 +1961,7 @@ function checkBurnAnomalies() {
   }
 
   for (const series of seriesList) {
-    const samples = history
+    const samples = sameAccountHistory(history, series.key)
       .map((e) => ({ t: e.timestamp, v: finiteOrNull(series.pick(e)) }))
       .filter((s) => s.v != null);
     if (samples.length < 5) continue;
@@ -2086,6 +2096,7 @@ async function storeUsageHistory(data) {
 
   const entry = {
     timestamp,
+    accountIdentities: usageAccountIdentities(data),
     session: finiteOrNull(data.five_hour?.utilization),
     weekly: finiteOrNull(data.seven_day?.utilization),
     sonnet: finiteOrNull(data.seven_day_sonnet?.utilization),
