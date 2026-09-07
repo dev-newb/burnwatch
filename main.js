@@ -375,7 +375,8 @@ function readCodexAuthCandidatesUncached() {
       candidates.push({
         ...source,
         accessToken,
-        accountId: auth.tokens?.account_id || null
+        accountId: auth.tokens?.account_id || null,
+        email: auth.tokens?.id_token ? (jwtClaims(auth.tokens.id_token).email || null) : null
       });
     } catch (err) {
       debugLog('[Codex] Could not read', source.id, 'auth.json:', err.message);
@@ -758,15 +759,22 @@ async function fetchCodexUsageBase() {
     const fetched = await fetchCodexWithToken(candidate.accessToken, candidate.accountId);
     return {
       candidate,
-      data: fetched && !fetched.accountId && candidate.accountId
-        ? { ...fetched, accountId: candidate.accountId }
-        : fetched
+      // Use the identity belonging to THIS credential file (including WSL),
+      // never the first detected CLI login or the widget's OAuth account.
+      data: fetched ? { ...fetched,
+        accountId: fetched.accountId || candidate.accountId,
+        email: fetched.email || candidate.email || null
+      } : null
     };
   }));
-  const [primary, cliResults] = await Promise.all([
+  const [primaryUsage, cliResults] = await Promise.all([
     oauth ? fetchCodexWithToken(oauth.accessToken, oauth.accountId) : Promise.resolve(null),
     fetchCli()
   ]);
+  const primary = primaryUsage ? { ...primaryUsage,
+    accountId: primaryUsage.accountId || oauth.accountId || null,
+    email: primaryUsage.email || oauth.email || null
+  } : null;
   let usableCliResults = cliResults.filter((result) => result.data);
 
   // A single blip (sleep/wake, brief network loss) used to drop straight to
