@@ -14,7 +14,10 @@ const { googleQuotaIssue, googleConnectionStatus } = require('./src/google-conne
 const { PROVIDER_SERIES, usageAccountIdentities, sameAccountHistory } = require('./src/account-history');
 const { discoverCredentialHomes, clearCredentialHomeCache } = require('./src/local-credential-sources');
 
-const { owner: GITHUB_OWNER, repo: GITHUB_REPO } = require('./package.json').build.publish[0];
+// electron-builder removes package.json's build configuration from app.asar.
+// Keep release-check coordinates available in the installed application.
+const GITHUB_OWNER = 'dev-newb';
+const GITHUB_REPO = 'imburning-electron';
 const { checkForUpdate, allowsPrerelease } = require('./src/release-check');
 
 // SSO trust is shared across profiles and managed before stores or login load.

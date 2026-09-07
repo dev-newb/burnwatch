@@ -37,3 +37,24 @@ test('management commands exit before migration, stores, locks or windows can af
   assert.equal(fs.existsSync(path.join(base, 'profiles/personal')), false);
   assert.deepEqual(fs.readdirSync(base).sort(), ['config.json', 'domain-whitelist.json', 'profiles']);
 });
+
+test('packaged startup works when electron-builder removes build metadata', t => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'imburning-packaged-startup-'));
+  t.after(() => fs.rmSync(base, {recursive: true, force: true}));
+  const metadata = {...localRequire('./package.json')};
+  delete metadata.build;
+  const exits = [];
+  const ctx = vm.createContext({process: {argv: ['--whitelist-list'], platform: 'darwin'},
+    console: {log() {}, warn() {}}, require: name => {
+      if (name === 'electron') return {app: {getPath: () => base, exit: code => exits.push(code)}};
+      if (name === './package.json') return metadata;
+      if (name === 'electron-store') return class {constructor() {throw new Error('No stores during this startup probe');}};
+      return localRequire(name);
+    }});
+  vm.runInContext('(function () {\n' + source + '\n})();', ctx);
+  assert.deepEqual(exits, [0]);
+  const releaseSource = source.match(/const GITHUB_OWNER = [^]*?const GITHUB_REPO = [^;]+;/)[0];
+  const release = vm.runInNewContext(releaseSource + '\n({owner:GITHUB_OWNER, repo:GITHUB_REPO})');
+  const {owner, repo} = localRequire('./package.json').build.publish[0];
+  assert.deepEqual({...release}, {owner, repo});
+});

@@ -59,3 +59,16 @@ test('failed reset returns failure and preserves the previous override', t => {
   assert.equal(configureWindowsIdentity({...f.options, argv: ['--reset-aumid']}), 1);
   assert.equal(fs.readFileSync(file, 'utf8'), before);
 });
+
+test('identity helper also loads when packaged metadata has no build section', () => {
+  const vm = require('node:vm');
+  const file = path.join(__dirname, '../src/windows-identity.js');
+  const localRequire = require('node:module').createRequire(file);
+  const metadata = {...require('../package.json')};
+  delete metadata.build;
+  const ctx = vm.createContext({module: {exports: {}}, process: {platform: 'darwin'}, console,
+    require: name => name === '../package.json' ? metadata : localRequire(name)});
+  vm.runInContext(fs.readFileSync(file, 'utf8'), ctx);
+  assert.equal(ctx.module.exports.defaultIdentity(''), 'com.burnwatch.app');
+  assert.equal(ctx.module.exports.configureWindowsIdentity({app: {}, argv: [], userData: '/unused'}), null);
+});

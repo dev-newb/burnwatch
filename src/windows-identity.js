@@ -3,7 +3,9 @@ const fs = require('fs');
 const path = require('path');
 const { createHash, randomUUID } = require('crypto');
 const { writeAtomicJson } = require('./atomic-json');
-const APP_ID = require('../package.json').build.appId;
+// The build section is stripped from packaged metadata. This helper loads on
+// every platform, so its default identity must survive packaging too.
+const APP_ID = 'com.burnwatch.app';
 
 function defaultIdentity(profile) {
   return profile ? `${APP_ID}.profile.${createHash('sha256').update(profile).digest('hex').slice(0, 16)}` : APP_ID;
