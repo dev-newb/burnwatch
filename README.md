@@ -185,6 +185,24 @@ npm install
 npm start          # or: npm run build:mac / build:win / build:linux
 ```
 
+### Enterprise SSO and platform recovery
+
+If your company's Claude sign-in redirects to an identity provider outside the built-in login domains, add its exact hostname:
+
+```bash
+npm start -- --whitelist-add=login.example.com
+npm start -- --whitelist-list
+npm start -- --whitelist-remove=login.example.com
+```
+
+Packaged builds accept the same flags after the executable name. These commands save the trusted domains and exit. The next login window uses the updated list, shared across profiles. Only HTTPS on the default port is allowed. A plain entry matches one host; an explicitly quoted `"*.example.com"` entry trusts that domain and all its subdomains. Add only identity-provider domains you trust. Saved entries in `domain-whitelist.json` are validated using the same rules as command-line input.
+
+On Windows, `--reset-aumid` (also `--reset-taskbar-identity`) saves a new taskbar identity and exits. Combine it with `--profile=work` to reset just that profile. Close and reopen the app, then unpin and repin its taskbar icon. The command preserves account settings and history.
+
+On a Wayland Linux desktop with Xwayland installed, `--xwayland-tray` opts into a one-time relaunch with `--ozone-platform=x11` for window/tray compatibility. An explicit `--ozone-platform` choice takes precedence. AppImage builds relaunch the original AppImage; a failed spawn keeps the current app running. This fallback is optional because desktop tray behavior varies; it has automated relaunch tests but still needs native Electron 43 validation on the affected Linux desktop.
+
+Release-candidate builds check for newer candidates and stable releases; stable builds check only stable releases. Download links open the exact detected release. Claude rate limits retry with bounded backoff and honor `Retry-After`; long cooldowns carry across refreshes without clearing the login.
+
 ---
 
 ## Privacy
