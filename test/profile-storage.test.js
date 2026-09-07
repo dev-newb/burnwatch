@@ -27,14 +27,14 @@ test('named profiles isolate migration and history using the final userData path
     let userData = dir;
     const profileLogs = [];
     const ctx = vm.createContext({
-      app: { getPath: () => userData, setPath: (_, value) => { userData = value; } },
-      process: { argv: [`--profile=${profile}`] }, path, require: createRequire(mainPath),
+      app: { getPath: () => userData, setPath: (_, value) => { userData = value; }, setAppUserModelId() {} },
+      process: { argv: [`--profile=${profile}`], platform: process.platform }, path, require: createRequire(mainPath),
       console: { log: message => profileLogs.push(message) },
       JsonlHistoryStore, HISTORY_RETENTION_DAYS: 8, MAX_HISTORY_SAMPLES: 10000, debugLog() {}
     });
     const startup = main.slice(main.indexOf('// Profile isolation'), main.indexOf('// Non-sensitive settings storage'));
     const history = main.match(/const historyStore = new JsonlHistoryStore\([^]*?\n}\);/)[0];
-    vm.runInContext(startup + '\n' + history + '\nglobalThis.paths = { configPath, historyStore };', ctx);
+    vm.runInContext('(function () {\n' + startup + '\n' + history + '\nglobalThis.paths = { configPath, historyStore };\n})();', ctx);
     assert.equal(ctx.paths.configPath, path.join(dir, 'profiles', profile, 'config.json'));
     assert.deepEqual(profileLogs, [`[Profile] Using profile "${profile}" -> userData: ${path.join(dir, 'profiles', profile)}`]);
     const store = ctx.paths.historyStore;

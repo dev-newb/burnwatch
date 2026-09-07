@@ -26,13 +26,19 @@ if (whitelistExit !== null) { app.exit(whitelistExit); return; }
 // Must run before ANYTHING reads app.getPath('userData') — including the
 // single-instance lock, so two profiles can run side by side.
 const _profileArg = process.argv.find((a) => a.startsWith('--profile='));
+let profileName = '';
 if (_profileArg) {
-  const profileName = _profileArg.split('=')[1].replace(/[^a-zA-Z0-9_-]/g, '_');
+  profileName = _profileArg.split('=')[1].replace(/[^a-zA-Z0-9_-]/g, '_');
   if (profileName) {
     app.setPath('userData', path.join(app.getPath('userData'), 'profiles', profileName));
     console.log(`[Profile] Using profile "${profileName}" -> userData: ${app.getPath('userData')}`);
   }
 }
+
+const { configureWindowsIdentity } = require('./src/windows-identity');
+const identityExit = configureWindowsIdentity({ app, argv: process.argv,
+  userData: app.getPath('userData'), profile: profileName, platform: process.platform });
+if (identityExit !== null) { app.exit(identityExit); return; }
 
 // Migration: Handle old encrypted config files from v1.7.0 and earlier
 // Must happen BEFORE creating Store instance to prevent parse errors
