@@ -15,6 +15,12 @@ const { discoverCredentialHomes, clearCredentialHomeCache } = require('./src/loc
 const GITHUB_OWNER = 'dev-newb';
 const GITHUB_REPO = 'burnwatch';
 
+// SSO trust is shared across profiles and managed before stores or login load.
+const { loadWhitelist, guardLoginNavigation, runWhitelistCommand } = require('./src/domain-whitelist');
+const baseUserDataPath = app.getPath('userData');
+const whitelistExit = runWhitelistCommand(process.argv, baseUserDataPath);
+if (whitelistExit !== null) { app.exit(whitelistExit); return; }
+
 // Profile isolation (ported from upstream): --profile=<name> launches a fully
 // separate instance with its own session, cookies, settings, and history.
 // Must run before ANYTHING reads app.getPath('userData') — including the
@@ -4138,32 +4144,8 @@ async function detectSessionKeyViaWindow() {
 
     let resolved = false;
 
-    // Security: restrict navigation to trusted domains only
-    const allowedLoginDomains = [
-      'claude.ai',
-      'accounts.google.com',
-      'appleid.apple.com',
-      'login.microsoftonline.com'
-    ];
-
-    loginWin.webContents.on('will-navigate', (event, url) => {
-      try {
-        const hostname = new URL(url).hostname;
-        const isAllowed = allowedLoginDomains.some(domain =>
-          hostname === domain || hostname.endsWith('.' + domain)
-        );
-        if (!isAllowed) {
-          event.preventDefault();
-          console.warn('[Security] Blocked login navigation to untrusted domain:', url);
-        } else {
-          // Update title bar to show current URL (read-only)
-          loginWin.setTitle(`Claude Login - ${url}`);
-        }
-      } catch (err) {
-        event.preventDefault();
-        console.warn('[Security] Blocked login navigation with invalid URL:', url);
-      }
-    });
+    // Reload additions for each login, validating saved entries just like CLI input.
+    guardLoginNavigation(loginWin, loadWhitelist(baseUserDataPath));
 
     // Update title on OAuth redirects and in-page navigation
     loginWin.webContents.on('did-navigate', (event, url) => {
@@ -4187,7 +4169,7 @@ async function detectSessionKeyViaWindow() {
       if (_settingSessionCookie) return;
       if (
         cookie.name === 'sessionKey' &&
-        cookie.domain.includes('claude.ai') &&
+        (cookie.domain === 'claude.ai' || cookie.domain === '.claude.ai') &&
         !removed &&
         cookie.value
       ) {
