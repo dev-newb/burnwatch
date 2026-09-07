@@ -13,7 +13,7 @@ Reviewed Electron `main` at `0de3d11` against all eight unmerged origin branches
 | `fix/elapsed-ring-color` | Reconcile with the existing continuous slate-to-green elapsed indicator, already independent of usage warning thresholds. Preserve the current design. |
 | `fix/offscreen-window-recovery` | Reconcile with the newer, tested three-case recovery policy already on main. |
 | `fix/quit-flag` | Retain main's existing before-quit flag and shared close gate; regression tests cover quitting with and without a live provider tray. |
-| `pr/window-fixes` | **Hold.** Four reproduced defects below and additional platform/integration work prevent acceptance as a whole. |
+| `pr/window-fixes` | **Do not merge as a whole.** Useful changes have now been ported separately with corrections; see the follow-up below. |
 
 The accepted merge adds a position-only recovery function used by native focus/restore events and by the existing show-window path. Native recovery does not call show/focus again, avoiding event re-entry. It preserves window size, intentional single-display overhang, current presets/Settings behavior, and the existing close-to-tray policy.
 
@@ -66,3 +66,23 @@ These are reproduced with synthetic inputs against the original `81aa79c` source
 - Four held-branch defects reproduced by `characterize-incoming.cjs`. Evidence and the complete incoming patch/commit inventory are retained in the separate review artifacts directory.
 
 Native Windows/Linux and physical monitor-disconnection tests were not performed. The live test used an isolated development instance; this merge does not replace either installed application bundle.
+
+## Follow-up: corrected feature ports — 2026-09-06
+
+The five useful remaining changes were implemented against current main rather than merging the historical branch:
+
+| Change | Current implementation |
+| --- | --- |
+| Claude rate-limit recovery | Real HTTP 429 and explicit `rate_limit_error` bodies trigger at most three attempts with exponential backoff. `Retry-After` seconds and dates are honored; long cooldowns survive later refreshes. Challenges/authentication failures remain distinct, optional endpoint failures remain optional, and no ciphertext or credentials are deleted for a rate limit. Completed fetch timeouts are cleared. |
+| Enterprise SSO domains | `--whitelist-add`, `--whitelist-remove`, and `--whitelist-list` manage an atomic JSON file shared by profiles. CLI and file reads share validation, including rejection of the reproduced `*.com` bypass. Both navigation and server redirects require trusted HTTPS domains without userinfo or non-default ports. Remote page titles cannot replace the displayed login URL; cookie matching uses the exact Claude domain. |
+| Windows taskbar identity | `--reset-aumid` / `--reset-taskbar-identity` writes an atomic, profile-specific identity override. Defaults use this fork's actual app ID; profile suffixes are stable and bounded. Invalid saved identities fall back without destroying the file. Management commands exit before stores, migration, locks, or windows. |
+| Pre-release updates | Semantic version ordering selects newer candidates or the final stable release for candidate builds. Stable installations stay stable. Candidate checks paginate release history and ignore drafts; failed/incomplete checks remain retryable errors. Publishing and checking now target `dev-newb/imburning-electron`. Download clicks use the exact release tag; candidate downloads do not invoke the Mac main-branch source rebuild. |
+| Linux / AppImage startup | `--xwayland-tray` opts into Xwayland when available, respects explicit Ozone choices, and prevents relaunch loops. AppImage startup executes the original image and waits for successful process spawn before quitting. Spawn failures resume normal startup. This remains opt-in pending native Electron 43 testing on affected desktops. |
+
+B01's destructive decryption handling and B03's manufactured utilization percentages were not ported. Current window recovery, close/tray policy, provider behavior, and geometry remain in place. The release-link renderer change is mirrored into Tauri; its backend is unchanged. Assets, dependencies, versions and build scripts are unchanged. The Electron package entry point now runs a small Linux startup wrapper before `main.js`.
+
+Final verification: **153 Electron tests and 36 Rust tests pass (189 total)**. The 30 added Electron tests cover retry exhaustion/cooldowns, trust-file validation, redirects, atomic-write failures, profile identity isolation, release ordering/pagination and exact download links, Linux handoff/error recovery, and early command exits. Shared JS/CSS remain byte-identical. A live unauthenticated GitHub check selected `v2.6.0` for a simulated `2.5.0` installation from the corrected repository.
+
+Native Mac smoke: the isolated Electron 43 build starts through the new entry point, opens Settings, loads the Claude sign-in page, retains its HTTPS URL title after the page loads, and closes cleanly. Native `--whitelist-list` and non-Windows `--reset-aumid` exit successfully. No account was signed in or adopted. A Google sign-in attempt was blocked by the existing popup-denial policy; this pass does not claim end-to-end OAuth/enterprise SSO completion. Neither installed app bundle was replaced.
+
+Remaining platform checks: verify taskbar reset/unpin/repin on Windows and multiple tray icons under the affected Linux desktop, including a real AppImage relaunch. The fallback is based on Electron's documented [Wayland window limitations](https://www.electronjs.org/docs/latest/api/browser-window#platform-notices) and [Linux tray behavior](https://www.electronjs.org/docs/latest/api/tray#platform-considerations); this Mac cannot establish native Windows/Linux appearance or compositor behavior.

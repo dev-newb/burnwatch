@@ -18,6 +18,8 @@
  *     and the next call starts clean.
  */
 const { BrowserWindow } = require('electron');
+const { createRateLimitRetry } = require('./rate-limit-retry');
+const retryRateLimit = createRateLimitRetry();
 
 /**
  * Known error signatures returned when Claude.ai blocks or changes behaviour.
@@ -58,16 +60,31 @@ function parseResponseBody(bodyText) {
  * session without guessing from the body shape.
  * @param {{status: number, bodyText: string}} result
  */
+function rateLimitError(retryAfter) {
+  const error = new Error('RateLimited: HTTP 429 or rate_limit_error');
+  error.statusCode = 429;
+  error.retryAfter = retryAfter;
+  return error;
+}
+
 function classifyFetchResult(result) {
   const status = Number(result?.status);
+  const bodyText = String(result?.bodyText ?? '');
+  // Cloudflare challenge pages remain distinct from endpoint rate limits.
+  if (status === 429 && !BLOCKED_SIGNATURES.some(sig => bodyText.includes(sig.pattern))) {
+    throw rateLimitError(result?.retryAfter);
+  }
   // A challenge page or malformed body does not establish an expired login.
-  const data = parseResponseBody(String(result?.bodyText ?? ''));
+  const data = parseResponseBody(bodyText);
   if (status === 401 || status === 403) {
     const error = new Error(`AuthFailure: HTTP ${status}`);
     error.statusCode = status;
     throw error;
   }
   if (!(status >= 200 && status < 300)) throw new Error(`HTTPFailure: HTTP ${status}`);
+  // Some proxy/API responses encode a typed error inside a successful HTTP
+  // response. Only the explicit error type is meaningful, never prose matches.
+  if (data?.error?.type === 'rate_limit_error') throw rateLimitError(result?.retryAfter);
   return data;
 }
 
@@ -144,7 +161,7 @@ function _ensureWindow(timeoutMs) {
  * @param {number} options.timeoutMs - Request timeout in milliseconds (default: 30000)
  * @returns {Promise<Object>} Parsed JSON response
  */
-async function fetchViaWindow(url, { timeoutMs = 30000 } = {}) {
+async function fetchOnceViaWindow(url, { timeoutMs = 30000 } = {}) {
   const win = await _ensureWindow(timeoutMs);
   _scheduleIdleTeardown();
 
@@ -155,21 +172,24 @@ async function fetchViaWindow(url, { timeoutMs = 30000 } = {}) {
         headers: { 'Accept': 'application/json' }
       });
       const bodyText = await res.text();
-      return { status: res.status, bodyText };
+      return { status: res.status, bodyText, retryAfter: res.headers.get('retry-after') };
     })()
   `;
 
   let result;
+  let timeout;
   try {
     result = await Promise.race([
       win.webContents.executeJavaScript(script, true),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Request timeout')), timeoutMs))
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Request timeout')), timeoutMs); })
     ]);
   } catch (err) {
     // A wedged or navigated-away window is worthless — discard it so the
     // next call starts from a clean navigation.
     destroyFetchWindow();
     throw err;
+  } finally {
+    clearTimeout(timeout);
   }
 
   try {
@@ -181,6 +201,10 @@ async function fetchViaWindow(url, { timeoutMs = 30000 } = {}) {
     if (/^(CloudflareBlocked|CloudflareChallenge)/.test(err.message)) destroyFetchWindow();
     throw err;
   }
+}
+
+function fetchViaWindow(url, options) {
+  return retryRateLimit(url, () => fetchOnceViaWindow(url, options));
 }
 
 module.exports = { fetchViaWindow, parseResponseBody, classifyFetchResult, destroyFetchWindow };

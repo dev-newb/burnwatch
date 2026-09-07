@@ -13,21 +13,33 @@ const { normalizeGeminiQuota, normalizeAntigravityModels } = require('./src/prov
 const { googleQuotaIssue, googleConnectionStatus } = require('./src/google-connection');
 const { discoverCredentialHomes, clearCredentialHomeCache } = require('./src/local-credential-sources');
 
-const GITHUB_OWNER = 'dev-newb';
-const GITHUB_REPO = 'burnwatch';
+const { owner: GITHUB_OWNER, repo: GITHUB_REPO } = require('./package.json').build.publish[0];
+const { checkForUpdate, allowsPrerelease } = require('./src/release-check');
+
+// SSO trust is shared across profiles and managed before stores or login load.
+const { loadWhitelist, guardLoginNavigation, runWhitelistCommand } = require('./src/domain-whitelist');
+const baseUserDataPath = app.getPath('userData');
+const whitelistExit = runWhitelistCommand(process.argv, baseUserDataPath);
+if (whitelistExit !== null) { app.exit(whitelistExit); return; }
 
 // Profile isolation (ported from upstream): --profile=<name> launches a fully
 // separate instance with its own session, cookies, settings, and history.
 // Must run before ANYTHING reads app.getPath('userData') — including the
 // single-instance lock, so two profiles can run side by side.
 const _profileArg = process.argv.find((a) => a.startsWith('--profile='));
+let profileName = '';
 if (_profileArg) {
-  const profileName = _profileArg.split('=')[1].replace(/[^a-zA-Z0-9_-]/g, '_');
+  profileName = _profileArg.split('=')[1].replace(/[^a-zA-Z0-9_-]/g, '_');
   if (profileName) {
     app.setPath('userData', path.join(app.getPath('userData'), 'profiles', profileName));
     console.log(`[Profile] Using profile "${profileName}" -> userData: ${app.getPath('userData')}`);
   }
 }
+
+const { configureWindowsIdentity } = require('./src/windows-identity');
+const identityExit = configureWindowsIdentity({ app, argv: process.argv,
+  userData: app.getPath('userData'), profile: profileName, platform: process.platform });
+if (identityExit !== null) { app.exit(identityExit); return; }
 
 // Migration: Handle old encrypted config files from v1.7.0 and earlier
 // Must happen BEFORE creating Store instance to prevent parse errors
@@ -4164,32 +4176,8 @@ async function detectSessionKeyViaWindow() {
 
     let resolved = false;
 
-    // Security: restrict navigation to trusted domains only
-    const allowedLoginDomains = [
-      'claude.ai',
-      'accounts.google.com',
-      'appleid.apple.com',
-      'login.microsoftonline.com'
-    ];
-
-    loginWin.webContents.on('will-navigate', (event, url) => {
-      try {
-        const hostname = new URL(url).hostname;
-        const isAllowed = allowedLoginDomains.some(domain =>
-          hostname === domain || hostname.endsWith('.' + domain)
-        );
-        if (!isAllowed) {
-          event.preventDefault();
-          console.warn('[Security] Blocked login navigation to untrusted domain:', url);
-        } else {
-          // Update title bar to show current URL (read-only)
-          loginWin.setTitle(`Claude Login - ${url}`);
-        }
-      } catch (err) {
-        event.preventDefault();
-        console.warn('[Security] Blocked login navigation with invalid URL:', url);
-      }
-    });
+    // Reload additions for each login, validating saved entries just like CLI input.
+    guardLoginNavigation(loginWin, loadWhitelist(baseUserDataPath));
 
     // Update title on OAuth redirects and in-page navigation
     loginWin.webContents.on('did-navigate', (event, url) => {
@@ -4213,7 +4201,7 @@ async function detectSessionKeyViaWindow() {
       if (_settingSessionCookie) return;
       if (
         cookie.name === 'sessionKey' &&
-        cookie.domain.includes('claude.ai') &&
+        (cookie.domain === 'claude.ai' || cookie.domain === '.claude.ai') &&
         !removed &&
         cookie.value
       ) {
@@ -4290,6 +4278,8 @@ function setupAutoUpdate() {
   // Portable builds can't self-replace their exe — they keep the banner+link flow
   if (process.platform === 'win32' && process.env.PORTABLE_EXECUTABLE_FILE) return;
 
+  autoUpdater.allowPrerelease = allowsPrerelease(app.getVersion());
+  autoUpdater.allowDowngrade = false;
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.on('update-downloaded', (info) => {
@@ -4353,83 +4343,13 @@ ipcMain.on('run-mac-update', () => {
   }
 });
 
-// Check GitHub releases for a newer version
-ipcMain.handle('check-for-update', () => {
-  return new Promise((resolve) => {
-    const options = {
-      hostname: 'api.github.com',
-      path: `/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`,
-      method: 'GET',
-      headers: {
-        'User-Agent': 'claude-usage-widget',
-        'Accept': 'application/vnd.github+json'
-      },
-      timeout: 5000
-    };
-
-    const req = https.request(options, (res) => {
-      let body = '';
-      res.on('data', (chunk) => { body += chunk; });
-      res.on('end', () => {
-        try {
-          // Non-200 (rate limit 403, transient 5xx, etc.) is a FAILED check,
-          // not "up to date" — flag it so the renderer can retry rather than
-          // silently give up until the next scheduled poll.
-          if (res.statusCode !== 200) {
-            resolve({ hasUpdate: false, version: null, error: true });
-            return;
-          }
-          const data = JSON.parse(body);
-          const tag = (data.tag_name || '').replace(/^v/, '');
-          const current = app.getVersion();
-          if (tag && isNewerVersion(tag, current)) {
-            // canSelfUpdate: darwin build-from-source install that can apply
-            // the update itself, so the banner offers "update" not "download".
-            resolve({ hasUpdate: true, version: tag, canSelfUpdate: !!macUpdateScript() });
-          } else {
-            resolve({ hasUpdate: false, version: null });
-          }
-        } catch {
-          resolve({ hasUpdate: false, version: null, error: true });
-        }
-      });
-    });
-
-    req.on('error', () => resolve({ hasUpdate: false, version: null, error: true }));
-    req.on('timeout', () => { req.destroy(); resolve({ hasUpdate: false, version: null, error: true }); });
-    req.end();
-  });
+// Release candidates can see newer candidates and the final stable release.
+// Stable installations remain on the stable channel.
+ipcMain.handle('check-for-update', async () => {
+  const result = await checkForUpdate({current: app.getVersion(), owner: GITHUB_OWNER, repo: GITHUB_REPO});
+  if (result.hasUpdate) result.canSelfUpdate = !allowsPrerelease(result.version) && !!macUpdateScript();
+  return result;
 });
-
-function isNewerVersion(remote, local) {
-  try {
-    const parseVersion = (ver) => {
-      const [mainVer, preRelease] = ver.split('-');
-      const parts = mainVer.split('.').map(Number);
-      return {
-        major: parts[0] || 0,
-        minor: parts[1] || 0,
-        patch: parts[2] || 0,
-        preRelease: preRelease || null
-      };
-    };
-
-    const r = parseVersion(remote);
-    const l = parseVersion(local);
-
-    // Never notify about pre-release versions (rc, beta, alpha, etc.)
-    if (r.preRelease !== null) return false;
-
-    // Compare major.minor.patch
-    if (r.major !== l.major) return r.major > l.major;
-    if (r.minor !== l.minor) return r.minor > l.minor;
-    if (r.patch !== l.patch) return r.patch > l.patch;
-
-    // Same version numbers — notify if local is a pre-release and remote is stable
-    // e.g. local=1.7.5-rc.1, remote=1.7.5 → user should be told stable is out
-    return l.preRelease !== null;
-  } catch { return false; }
-}
 
 // ---- Degraded-session tracking ----
 // Only explicit 401/403s wipe credentials (transient Cloudflare/HTML blocks
@@ -4491,7 +4411,11 @@ ipcMain.handle('fetch-usage-data', async (event, options = {}) => {
     const hasClaudeUsage = !!(cc && (cc.five_hour?.resets_at || cc.seven_day?.resets_at));
     const offers = detectCliOffers(cliAdopted);
     const googleConnection = getGoogleConnectionStatus();
-    if (!hasClaudeUsage && !codexF && !geminiF && !Object.keys(offers).length && !googleConnection.connected) {
+    // A configured Google account can need reauthorization without having any
+    // quota or other provider data. Deliver its status so sign-in can render.
+    const googleNeedsReauth = googleConnection.usageIssue === 'reauth-required';
+    if (!hasClaudeUsage && !codexF && !geminiF && !Object.keys(offers).length
+        && !googleConnection.connected && !googleNeedsReauth) {
       throw new Error('Missing credentials');
     }
     const data = {

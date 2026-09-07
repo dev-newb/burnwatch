@@ -97,3 +97,62 @@ test('a Google-only signed-in account with no quota still reaches the widget', a
   assert.equal(data.gemini, undefined);
   assert.equal(data.anthropic_source, 'none');
 });
+
+test('a Google-only invalid_grant reaches both sign-in controls without discarding credentials', async () => {
+  let storedTokens = { ...tokens, expiresAt: 1 };
+  let refreshCalls = 0;
+  const elements = Object.fromEntries(['connectRowGoogle', 'googleUsageStatus', 'googleLoginStatus',
+    'disconnectGoogleBtn', 'settingsConnectGoogleBtn'].map(key => [key, {
+      style: { display: 'none' }, classList: { remove() {} }
+    }]));
+  const ctx = vm.createContext({
+    URLSearchParams, AbortSignal, Date, googleQuotaIssue, googleConnectionStatus, normalizeGeminiQuota,
+    elements, latestUsageData: null, credentials: null, debugLog() {}, OAUTH_HTTP_TIMEOUT_MS: 15000,
+    GOOGLE_OAUTH: { tokenUrl: 'https://tokens.invalid/google' },
+    loadOAuthTokens: () => storedTokens,
+    getGeminiOAuthClient: () => ({ id: 'test-client', secret: 'test-client-secret' }),
+    fetch: async url => {
+      assert.equal(url, 'https://tokens.invalid/google');
+      refreshCalls++;
+      return { status: 400, json: async () => ({ error: 'invalid_grant' }) };
+    },
+    storeOAuthTokens() { assert.fail('Failed refresh must not replace stored credentials'); },
+    postGeminiCodeAssist() { assert.fail('Quota must not be fetched after authorization fails'); },
+    sanitizeFetchOptions: x => x, readStoredSessionKey: () => null,
+    store: { get: (key, fallback) => ['settings.showCodex', 'settings.showCodexCli'].includes(key) ? false : fallback, set() {} },
+    cliAdoptionState: () => ({ google: false, anthropic: false }),
+    cachedProviderFetch: async (_key, fetchProvider) => fetchProvider(),
+    detectCliOffers: () => ({}), storeUsageHistory: async () => {}, applyAccountToggles() {},
+    computeForecasts() {}, computeSessionPlans() {}, computeFrozenProviders() {}, checkBurnAnomalies() {},
+    getBurningSeriesMap() {}, checkDailyDigest() {}, notifyGraphWindow() {}, updateTrayIcon() {}
+  });
+  vm.runInContext('let _googleOAuthQuotaState = null;', ctx);
+  for (const name of ['getOAuthAccessToken', 'fetchGeminiWithToken', 'fetchGeminiUsage',
+    'fetchGoogleUsage', 'getGoogleConnectionStatus']) {
+    const match = main.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n}`));
+    assert.ok(match, name);
+    vm.runInContext(match[0], ctx);
+  }
+  const start = main.indexOf("ipcMain.handle('fetch-usage-data', async (event, options = {}) => {");
+  const body = main.slice(main.indexOf('\n', start), main.indexOf('  // Kick off the Claude Code', start));
+  vm.runInContext(`async function fetchUsage(options = {}) {${body}}`, ctx);
+  vm.runInContext(renderer.match(/function syncGoogleAuthControls\([^]*?\n}/)[0], ctx);
+
+  const data = await ctx.fetchUsage();
+  assert.equal(refreshCalls, 1);
+  assert.equal(data.googleConnection.connected, false);
+  assert.equal(data.googleConnection.usageIssue, 'reauth-required');
+  assert.equal(data.gemini, undefined);
+  assert.equal(storedTokens.accessToken, tokens.accessToken);
+  assert.doesNotMatch(JSON.stringify(data), /private-test-token|private-refresh/);
+  ctx.syncGoogleAuthControls(data);
+  assert.equal(elements.connectRowGoogle.style.display, '');
+  assert.equal(elements.settingsConnectGoogleBtn.style.display, '');
+  assert.equal(elements.disconnectGoogleBtn.style.display, 'none');
+  assert.match(elements.googleUsageStatus.textContent, /authorization has expired/);
+
+  // A later explicit disconnect must not keep a stale reauthorization state.
+  storedTokens = null;
+  await assert.rejects(ctx.fetchUsage(), /Missing credentials/);
+  assert.equal(ctx.getGoogleConnectionStatus().usageIssue, null);
+});

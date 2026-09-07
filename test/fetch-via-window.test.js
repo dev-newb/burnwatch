@@ -39,6 +39,13 @@ test('status-aware classification turns 401/403 into explicit auth failures', ()
   assert.throws(() => classifyFetchResult({ status: 401, bodyText: '{}' }), (err) => err.statusCode === 401);
   assert.throws(() => classifyFetchResult({ status: 403, bodyText: '{"error":"denied"}' }), (err) => err.statusCode === 403);
   assert.deepEqual(classifyFetchResult({ status: 200, bodyText: '{"ok":1}' }), { ok: 1 });
+  assert.deepEqual(classifyFetchResult({ status: 200, bodyText: '{"message":"rate limit remaining"}' }), { message: 'rate limit remaining' });
+  for (const bodyText of ['Too many requests', '{"error":{"type":"rate_limit_error","message":"Please retry later"}}']) {
+    assert.throws(() => classifyFetchResult({status: 429, bodyText, retryAfter: '30'}), error =>
+      error.statusCode === 429 && error.retryAfter === '30');
+  }
+  assert.throws(() => classifyFetchResult({status: 429, bodyText: '<html>Just a moment'}), /CloudflareBlocked/);
+  assert.throws(() => classifyFetchResult({status: 200, bodyText: '{"error":{"type":"rate_limit_error","message":"Please retry later"}}'}), error => error.statusCode === 429);
   assert.throws(() => classifyFetchResult({ status: 200, bodyText: '<html>Just a moment' }), /CloudflareBlocked/);
   const { isExplicitAuthFailure } = require('../src/usage-math');
   for (const result of [
