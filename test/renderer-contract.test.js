@@ -102,7 +102,7 @@ test('Gemini quota discovery uses the CLI account project and preserves fallback
 
   assert.match(main, /postGeminiCodeAssist\(token, 'loadCodeAssist',[\s\S]*pluginType: 'GEMINI'/);
   assert.match(main, /load\?\.cloudaicompanionProject[\s\S]*postGeminiCodeAssist\(token, 'retrieveUserQuota', project \? \{ project \} : \{\}\)/);
-  assert.match(main, /return normalizeGeminiQuota\(quota\);/);
+  assert.match(main, /const normalized = normalizeGeminiQuota\(quota\);/);
 });
 
 test('window presets remain user-sized and enforce the narrow-layout floor', () => {

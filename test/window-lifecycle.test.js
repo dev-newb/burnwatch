@@ -12,13 +12,15 @@ const source = fs.readFileSync(path.join(__dirname, '../main.js'), 'utf8');
 const MAIN = { id: 1, workArea: { x: 0, y: 0, width: 1920, height: 1040 } };
 const SIDE = { id: 2, workArea: { x: 1920, y: 0, width: 1280, height: 1040 } };
 
-function harness(displays = [MAIN]) {
-  const saved = new Map();
+function harness(displays = [MAIN], settings = {}) {
+  const saved = new Map(Object.entries(settings));
   const timers = new Map();
   let nextTimer = 0;
   class Window extends EventEmitter {
     constructor(options) {
       super();
+      this.alwaysOnTop = options.alwaysOnTop;
+      this.pinCalls = [];
       this.bounds = { x: 100, y: 100, width: options.width, height: options.height };
       this.visible = true;
       this.minimized = false;
@@ -38,6 +40,8 @@ function harness(displays = [MAIN]) {
     restore() { this.minimized = false; this.emit('restore'); }
     show() { this.showCalls++; this.visible = true; }
     hide() { this.visible = false; }
+    isAlwaysOnTop() { return this.alwaysOnTop; }
+    setAlwaysOnTop(value) { this.alwaysOnTop = value; this.pinCalls.push(value); }
     focus() { this.focusCalls++; this.emit('focus'); }
   }
   const ctx = vm.createContext({
@@ -47,7 +51,7 @@ function harness(displays = [MAIN]) {
     DEBUG: false, debugLog() {}, sendUpdateReady() {}, windowIsUserSized: () => false,
     screen: { getPrimaryDisplay: () => displays[0], getAllDisplays: () => displays },
     recoverBounds, clearsVisibilityThreshold,
-    store: { get: key => saved.get(key), set: (key, value) => saved.set(key, value) },
+    store: { get: (key, fallback) => saved.has(key) ? saved.get(key) : fallback, set: (key, value) => saved.set(key, value) },
     isQuitting: false, restoreTray: null, sessionTray: null, weeklyTray: null, fableTray: null,
     _providerTrays: {},
     setTimeout: callback => { const id = ++nextTimer; timers.set(id, callback); return id; },
@@ -55,13 +59,33 @@ function harness(displays = [MAIN]) {
   });
   for (const name of ['orderedDisplays', 'recoverWindowBounds', 'hasTrayIcon',
     'recoverMainWindowPosition', 'showMainWindowSmart', 'createMainWindow',
-    'isMainWindowShownOnScreen', 'attachTrayToggleClick']) {
+    'isMainWindowShownOnScreen', 'attachTrayToggleClick', 'applyMainWindowAlwaysOnTop']) {
     const match = source.match(new RegExp(`function ${name}\\([^]*?\\n}`));
     if (match) vm.runInContext(match[0], ctx);
   }
   vm.runInContext('createMainWindow()', ctx);
   return { ctx, window: ctx.mainWindow, saved, timers };
 }
+
+test('window is created at the saved pin level, including before startup finishes', () => {
+  assert.equal(harness().window.alwaysOnTop, true);
+  assert.equal(harness([MAIN], { 'settings.alwaysOnTop': false }).window.alwaysOnTop, false);
+  assert.equal(harness([MAIN], { 'settings.alwaysOnTop': true }).window.alwaysOnTop, true);
+});
+
+test('pin recovery also repairs a stale topmost window when the preference is off', () => {
+  const h = harness([MAIN], { 'settings.alwaysOnTop': false });
+  h.window.alwaysOnTop = true;
+  h.ctx.applyMainWindowAlwaysOnTop();
+  assert.equal(h.window.alwaysOnTop, false);
+  h.ctx.applyMainWindowAlwaysOnTop();
+  assert.deepEqual(h.window.pinCalls, [false]);
+  h.saved.set('settings.alwaysOnTop', true);
+  h.ctx.applyMainWindowAlwaysOnTop();
+  assert.equal(h.window.alwaysOnTop, true);
+  h.window.destroyed = true;
+  assert.doesNotThrow(() => h.ctx.applyMainWindowAlwaysOnTop());
+});
 
 for (const event of ['focus', 'restore']) {
   for (const scenario of [
